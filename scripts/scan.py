@@ -570,6 +570,35 @@ def has_indicators(sym):
     return True
 
 
+# ══════════════════════════════════════════════════════════════
+#  交易时间探测 — 用少量探针股票判断市场是否有新数据
+# ══════════════════════════════════════════════════════════════
+
+# 高流动性探针: 贵州茅台(沪), 平安银行(深), 中国平安(深)
+_PROBE_CODES = ["sh.600519", "sz.000001", "sz.601318"]
+
+async def is_market_active(session: aiohttp.ClientSession, cache: dict) -> bool:
+    """拉取探针股票最新15m K线, 与缓存对比; 有任一更新即视为交易中."""
+    for code in _PROBE_CODES:
+        try:
+            fresh = await fetch_klines(session, code, "15", limit=1)
+            if not fresh:
+                continue
+            fresh_ts = fresh[-1][0]
+            cached_bars = cache.get(code, {}).get("15", {}).get("data", [])
+            if not cached_bars:
+                # 无缓存, 视为首次运行, 继续扫描
+                log.info("探针 %s 无缓存, 视为活跃", code)
+                return True
+            if fresh_ts != cached_bars[-1][0]:
+                log.info("探针 %s 数据已更新 (%s -> %s)", code, cached_bars[-1][0], fresh_ts)
+                return True
+        except Exception as e:
+            log.warning("探针 %s 检测失败: %s", code, e)
+            continue
+    return False
+
+
 async def main():
     scan_start = time.time()
     bj_tz = timezone(timedelta(hours=8))
@@ -579,6 +608,11 @@ async def main():
     cache = load_cache()
 
     async with aiohttp.ClientSession() as session:
+        # 0. 探测市场是否活跃 (非交易时间直接退出)
+        if not await is_market_active(session, cache):
+            log.info("探针股票数据未更新, 判定为非交易时间, 跳过本次扫描")
+            return
+
         # 1. 股票列表
         stocks = await fetch_all_stocks(session)
         if not stocks:
