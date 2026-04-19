@@ -607,11 +607,16 @@ async def main():
 
     cache = load_cache()
 
+    # 如果 data 目录不存在或没有数据文件, 强制扫描 (首次部署必须生成数据)
+    has_data = DATA_DIR.exists() and any(DATA_DIR.glob("*.json"))
+
     async with aiohttp.ClientSession() as session:
         # 0. 探测市场是否活跃 (非交易时间直接退出)
-        if not await is_market_active(session, cache):
+        if has_data and not await is_market_active(session, cache):
             log.info("探针股票数据未更新, 判定为非交易时间, 跳过本次扫描")
             return
+        if not has_data:
+            log.info("data 目录无数据, 强制执行首次扫描")
 
         # 1. 股票列表
         stocks = await fetch_all_stocks(session)
