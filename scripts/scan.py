@@ -7,6 +7,7 @@ A股股票扫描器 — 扫描脚本
 标签: 趋势共振 · 成交量异动 · 大盘方向 · 防追高
       · 龙头股 · 仙人指路 · 波动充足 · 小量大涨 · 盘整突破
       · 潜伏信号 (盘整蓄势 + 底部支撑)
+      · 周K潜伏 (周线级别盘整蓄势 + 底部支撑)
 """
 from __future__ import annotations
 
@@ -1465,6 +1466,130 @@ def detect_ambush_setup(sym, all_sym, code, cycle="D"):
         return False, []
 
 
+def _relative_strength_weekly(sym, all_sym, lookback=10):
+    """个股相对大盘的周线强度: 个股近 lookback 周涨幅 - 大盘近 lookback 周涨幅."""
+    try:
+        w_data = sym["W"]["data"]
+        if len(w_data) < lookback + 1:
+            return 0.0
+        stock_ret = (float(w_data[-1][4]) - float(w_data[-lookback - 1][4])) / float(w_data[-lookback - 1][4])
+        idx = all_sym.get("000001")
+        if not idx or "W" not in idx or len(idx["W"].get("data", [])) < lookback + 1:
+            return stock_ret
+        idx_data = idx["W"]["data"]
+        idx_ret = (float(idx_data[-1][4]) - float(idx_data[-lookback - 1][4])) / float(idx_data[-lookback - 1][4])
+        return stock_ret - idx_ret
+    except (IndexError, KeyError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def detect_ambush_setup_weekly(sym, all_sym, code):
+    """周K潜伏信号检测: 周线级别盘整蓄势 + 底部支撑.
+
+    与日K潜伏信号逻辑相同, 但参数针对周线调优:
+    - 数据周期: W (周线)
+    - 布林带分位回看: 40 根 (约 10 个月)
+    - 布林带收窄窗口: 5 根 (约 5 周)
+    - 成交量萎缩: 近 4 周 vs 近 20 周基准
+    - 间歇性放量: 回看 10 周
+    - 下影线密度: 回看 10 周
+    - 相对强度: 回看 10 周
+    - 均线粘合 / RSI: 仍用 60m 数据做跨周期确认
+
+    综合评分, 满足 4 项及以上视为周K潜伏信号:
+    1. 周线布林带宽度处于近40根最低25%分位
+    2. 周线布林带宽度持续收窄
+    3. 均线粘合 (60m MA散度 < 3%)
+    4. 周线成交量萎缩 (近4周均量 < 近20周均量的65%)
+    5. RSI中性区 (60m) 或 周线MACD收敛
+    6. 周线间歇性放量不跌
+    7. 周线下影线密度高
+    8. 周线相对大盘强势
+
+    返回: (bool, list[str]) — 是否触发, 满足的子条件列表
+    """
+    try:
+        c = sym.get("W")
+        if not c or "bolling" not in c:
+            return False, []
+        data = c.get("data", [])
+        bolling = c["bolling"]
+        if len(data) < 26:
+            return False, []
+
+        score = 0
+        details = []
+
+        # 1. 周线布林带宽度低分位 (回看 40 根)
+        pct = _boll_width_percentile(bolling, 40)
+        if pct <= 25:
+            score += 1
+            details.append("周带宽收敛")
+
+        # 2. 周线布林带持续收窄 (窗口 5 根)
+        if _boll_width_narrowing(bolling, 5):
+            score += 1
+            details.append("周持续收窄")
+
+        # 3. 均线粘合 (仍用 60m MA 做跨周期确认)
+        c60 = sym.get("60", {})
+        ma_keys = ["ma30", "ma60", "ma120"]
+        if all(k in c60 and len(c60[k]) >= 1 for k in ma_keys):
+            vals = [c60[k][-1] for k in ma_keys]
+            valid = [v for v in vals if v is not None and v == v and v > 0]
+            if len(valid) >= 3:
+                mx, mn = max(valid), min(valid)
+                if mn > 0 and (mx - mn) / mn < 0.03:
+                    score += 1
+                    details.append("均线粘合")
+
+        # 4. 周线成交量萎缩 (近 4 周 vs 近 20 周基准)
+        n = len(data)
+        if n >= 20:
+            recent_vol = sum(float(data[i][6]) for i in range(n - 4, n)) / 4
+            base_vol = sum(float(data[i][6]) for i in range(n - 20, n - 4)) / 16
+            if base_vol > 0 and recent_vol < base_vol * 0.65:
+                score += 1
+                details.append("周缩量蓄势")
+
+        # 5. RSI中性区 (60m) 或 周线MACD收敛
+        if "rsi" in c60 and len(c60.get("rsi", [])) >= 1:
+            rsi_val = c60["rsi"][-1]
+            if not math.isnan(rsi_val) and 38 <= rsi_val <= 62:
+                score += 1
+                details.append("RSI中性")
+        elif "macd" in c:
+            macd = c["macd"]
+            hist = macd["macdLine"][-1] - macd["signalLine"][-1]
+            if abs(hist) < abs(macd["macdLine"][-1]) * 0.3:
+                score += 1
+                details.append("周MACD收敛")
+
+        # 6. 周线间歇性放量不跌 (回看 10 周)
+        accum = _intermittent_accumulation(data, 10)
+        if accum >= 1:
+            score += 1
+            details.append(f"周吸筹{accum}次")
+
+        # 7. 周线下影线密度 (回看 10 周)
+        shadow = _lower_shadow_density(data, 10)
+        if shadow >= 0.25:
+            score += 1
+            details.append("周下方支撑")
+
+        # 8. 周线相对强度 (回看 10 周)
+        rs = _relative_strength_weekly(sym, all_sym, 10)
+        if rs > 0.01:
+            score += 1
+            details.append("周强于大盘")
+
+        # 需要至少 4 项满足
+        return score >= 4, details
+
+    except (KeyError, IndexError, ValueError, TypeError):
+        return False, []
+
+
 # ══════════════════════════════════════════════════════════════
 #  数据校验 + 主流程
 # ══════════════════════════════════════════════════════════════
@@ -1585,6 +1710,8 @@ async def main():
         if detect_consolidation_breakout(sym, "60"): tags.append("盘整突破")
         ambush, _ambush_details = detect_ambush_setup(sym, all_sym, code, "D")
         if ambush: tags.append("潜伏信号")
+        w_ambush, _w_ambush_details = detect_ambush_setup_weekly(sym, all_sym, code)
+        if w_ambush: tags.append("周K潜伏")
 
         if not tags: continue
         bar = sym["D"]["data"][-1]

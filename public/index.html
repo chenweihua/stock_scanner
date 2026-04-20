@@ -324,6 +324,11 @@
             color: #fff;
         }
 
+        .tag-ambush-weekly {
+            background: #f57f17;
+            color: #fff;
+        }
+
         .no-data {
             text-align: center;
             padding: 40px;
@@ -551,7 +556,7 @@
             <p class="subtitle">沪深A股 · 多周期趋势共振选股</p>
             <p class="filter-desc">
                 默认组合：趋势共振 + 波动充足 + 未追高（点击标签可自由增减组合）<br>
-                可选标签：成交量异动 · 龙头股 · 仙人指路 · 小量大涨 · 盘整突破<br>
+                可选标签：成交量异动 · 龙头股 · 仙人指路 · 小量大涨 · 盘整突破 · 周K潜伏<br>
                 大盘方向为全局条件，不可作为筛选标签
             </p>
         </header>
@@ -621,6 +626,7 @@
             '波动充足': 'tag-volatile',
             '小量大涨': 'tag-lowvol',
             '盘整突破': 'tag-breakout',
+            '周K潜伏': 'tag-ambush-weekly',
         };
 
         const NON_FILTERABLE = new Set(['大盘看多']);
